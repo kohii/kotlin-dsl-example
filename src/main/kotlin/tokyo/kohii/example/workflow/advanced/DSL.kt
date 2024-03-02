@@ -1,78 +1,75 @@
 package tokyo.kohii.example.workflow.advanced
 
-@DslMarker
-annotation class WorkflowDsl
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
-@WorkflowDsl
-sealed interface WorkflowNode {
-    fun run()
+class Task(private val action: () -> Unit) {
+    fun run() = action()
 }
 
-class Task(
-    private val action: () -> Unit
-) : WorkflowNode {
-    override fun run() = action()
-}
-
-class Sequential(
-    private val nodes: List<WorkflowNode>
-) : WorkflowNode {
-    override fun run() {
-        nodes.forEach { it.run() }
-    }
-}
-
-class Parallel(
-    private val nodes: List<WorkflowNode>,
-    private val maxConcurrency: Int?,
-) : WorkflowNode {
-    override fun run() {
-        val executor = if (maxConcurrency != null) {
-            java.util.concurrent.Executors.newFixedThreadPool(maxConcurrency)
-        } else {
-            java.util.concurrent.Executors.newCachedThreadPool()
-        }
-
-        val futures = nodes.map { action ->
-            executor.submit {
-                action.run()
-            }
-        }
-
-        futures.forEach { it.get() }
-        executor.shutdown()
-    }
-}
+class Dependency(val from: Task, val to: Task)
 
 class Workflow(
-    private val node: WorkflowNode
-) : WorkflowNode {
-    override fun run() = node.run()
+    private val tasks: List<Task>,
+    private val dependencies: List<Dependency>,
+    private val maxConcurrency: Int?
+) {
+    private val taskFutures = ConcurrentHashMap<Task, CompletableFuture<*>>()
+
+    fun run() {
+        val executorService = if (maxConcurrency != null) {
+            Executors.newFixedThreadPool(maxConcurrency)
+        } else {
+            Executors.newCachedThreadPool()
+        }
+        val futures = tasks.map { it.runAsyncWithDependencies(executorService) }
+        futures.forEach { it.get() }
+        executorService.shutdown()
+    }
+
+    private fun Task.runAsyncWithDependencies(executorService: ExecutorService): CompletableFuture<*> {
+        val future = taskFutures.computeIfAbsent(this) {
+            CompletableFuture.supplyAsync({
+                // Wait for all dependencies to complete
+                dependencies.filter { it.from == this }
+                    .map { it.to.runAsyncWithDependencies(executorService) }
+                    .forEach { it.get() }
+                this.run()
+            }, executorService)
+        }
+        return future
+    }
 }
 
-@WorkflowDsl
-class ExecutionBuilder {
-    val nodes = mutableListOf<WorkflowNode>()
+class WorkflowBuilder {
+    private val tasks = mutableListOf<Task>()
+    private val dependencies = mutableListOf<Dependency>()
 
-    fun sequential(block: ExecutionBuilder.() -> Unit) {
-        val builder = ExecutionBuilder()
-        builder.block()
-        nodes.add(Sequential(builder.nodes))
+    fun task(action: () -> Unit): Task {
+        return Task(action).also { tasks.add(it) }
     }
 
-    fun parallel(maxConcurrency: Int? = null, block: ExecutionBuilder.() -> Unit) {
-        val builder = ExecutionBuilder()
-        builder.block()
-        nodes.add(Parallel(builder.nodes, maxConcurrency))
+    infix fun Task.dependsOn(other: Task) {
+        dependencies.add(Dependency(this, other))
     }
 
-    operator fun (() -> Unit).unaryPlus() {
-        nodes.add(Task(this))
+    infix fun Collection<Task>.dependsOn(other: Task) {
+        forEach { it.dependsOn(other) }
+    }
+
+    infix fun Task.dependsOn(others: Collection<Task>) {
+        others.forEach { dependsOn(it) }
+    }
+
+    fun build(maxConcurrency: Int?): Workflow {
+        return Workflow(tasks, dependencies, maxConcurrency)
     }
 }
 
-fun workflow(block: ExecutionBuilder.() -> Unit): WorkflowNode {
-    val builder = ExecutionBuilder()
+fun buildWorkflow(maxConcurrency: Int? = null, block: WorkflowBuilder.() -> Unit): Workflow {
+    val builder = WorkflowBuilder()
     builder.block()
-    return Sequential(builder.nodes)
+    return builder.build(maxConcurrency)
 }

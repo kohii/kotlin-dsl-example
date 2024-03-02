@@ -3,7 +3,7 @@ plugins {
     application
 }
 
-group = "org.example"
+group = "tokyo.kohii.example.workflow"
 version = "1.0-SNAPSHOT"
 
 repositories {

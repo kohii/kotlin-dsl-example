@@ -1,6 +1,7 @@
 package tokyo.kohii.example.workflow.simple
 
 fun main() {
+
     val workflow = workflow {
         task { println("Task 1") }
         parallel {
@@ -24,4 +25,5 @@ fun main() {
         task { println("Task 8") }
     }
     workflow.run()
+
 }

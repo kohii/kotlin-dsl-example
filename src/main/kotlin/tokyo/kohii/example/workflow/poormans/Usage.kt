@@ -24,6 +24,5 @@ fun main() {
         ),
         Task { println("Task 8") },
     )
-
     workflow.run()
 }
